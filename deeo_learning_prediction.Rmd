@@ -1,0 +1,246 @@
+---
+title: "Assignment"
+output:
+  pdf_document: default
+  html_document: default
+date: '2024-11-28'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r load_libraries, echo=FALSE}
+library(readxl)      # For reading Excel files
+library(forecast)
+library(ggplot2)
+library(keras)
+library(tensorflow)
+library(tseries)
+library(dplyr)
+
+```
+
+```{r load_data, echo=FALSE}
+elec_train <- read_excel('2023-11-Elec-train.xlsx') 
+colnames(elec_train) <- c("Date", "Power_kw", "Temp_c")
+
+elec_train$Date <- as.POSIXct(elec_train$Date, format="%m/%d/%Y %H:%M", tz="UTC")
+# Add time features
+elec_train$Hour <- as.numeric(format(elec_train$Date, "%H"))
+elec_train$Day <- as.numeric(format(elec_train$Date, "%u"))
+
+
+head(elec_train)
+
+
+```
+
+
+```{r check_missing_value, echo=FALSE}
+
+colSums(is.na(elec_train))
+```
+
+
+
+### Handle missing values 
+
+Plot Missing Data for power 
+```{r missing_data_power, echo= FALSE}
+
+library(imputeTS)
+
+ggplot_na_distribution(elec_train$Power_kw)
+
+
+elec_train$Power_kw = na_interpolation(elec_train$Power_kw)
+
+ggplot_na_distribution(elec_train$Power_kw)
+
+```
+```{r check_missing_value_2, echo=FALSE}
+
+colSums(is.na(elec_train))
+```
+
+
+```{r check_missing_value_3, echo=FALSE}
+
+colSums(is.na(elec_train))
+```
+```{r missing_value_after_dateformat, echo=FALSE}
+# Remove rows where Date is NA
+elec_train <- elec_train[!is.na(elec_train$Date), ]
+
+# Verify that no missing values remain in the Date column
+colSums(is.na(elec_train))
+```
+## Summmry 
+
+```{r summary, echo=FALSE}
+summary(elec_train)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r plot_data, echo=FALSE}
+plot(elec_train)
+```
+
+
+### ACF , PACF and ADF Test
+
+To check the Seasonality for Power- ACF AND PACF
+
+```{r check_seasonality_power}
+
+# Convert to time series
+power_ts <- ts(elec_train$Power_kw, frequency = 96)
+
+# ACF and PACF to check seasonality for power
+acf(power_ts, lag.max = 100)
+pacf(power_ts, lag.max = 100)
+
+```
+
+
+To check the Seasonality for Temperature - ACF AND PACF
+```{r seasonality_check_decompose, echo=FALSE}
+print(frequency(power_ts))
+
+decomposition <- decompose(power_ts, type = "additive")
+plot(decomposition)
+
+```
+We could see the stron seaonality in the data. 
+
+
+Test for Stationarity
+
+```{r test_stationrity_power, echo=FALSE}
+
+library(tseries)
+
+adf_test <- adf.test(elec_train$Temp_c, alternative = "stationary")
+print(adf_test)
+
+```
+
+Above concludes that we can make ARIMA test
+
+
+ACF: Significant autocorrelation at lag 1 and several subsequent lags, indicating potential for ARIMA models.
+PACF: A sharp drop after lag 1, which suggests an AR(1) process could be appropriate.
+
+
+### rTime Seies Plot
+
+```{r time series plotr, echo=FALSE}
+library(ggplot2)
+library(forecast)
+
+autoplot(power_ts) +
+  ggtitle("Electricity Consumption Time Series") +
+  xlab("Time") +
+  ylab("Power (kW)")
+
+```
+```{r }
+fit=tslm(power_ts~Temp_c+Hour+Day+trend+season,data=elec_train)
+summary(fit)
+```
+Here we could see that Temperature plays a significant role in the power consumption 
+
+
+```{r}
+library(keras)
+library(tensorflow)
+```
+
+
+```{r}
+scaled_data <- scale(elec_train[, c("Power_kw", "Temp_c")])
+
+# Create sequences for training (lags)
+lag <- 96 * 4 # 96 days with 15-minute intervals
+X <- array(NA, dim = c(nrow(scaled_data) - lag, lag, 2))
+y <- numeric(nrow(scaled_data) - lag)
+
+for (i in 1:(nrow(scaled_data) - lag)) {
+  X[i, , ] <- scaled_data[i:(i + lag - 1), ]
+  y[i] <- scaled_data[i + lag, "Power_kw"]
+}
+
+# Split the data into training and testing
+set.seed(123)
+train_size <- floor(0.8 * length(y))
+train_X <- X[1:train_size, , ]
+train_y <- y[1:train_size]
+test_X <- X[(train_size + 1):length(y), , ]
+test_y <- y[(train_size + 1):length(y)]
+```
+
+
+```{r}
+# Define the LSTM model using the Functional API
+input_layer <- layer_input(shape = c(1, 1), name = "input_layer")
+
+# Add layers
+lstm_1 <- input_layer %>%
+  layer_lstm(units = 50, return_sequences = TRUE, name = "lstm_1") %>%
+  layer_dropout(rate = 0.2, name = "dropout_1")
+
+lstm_2 <- lstm_1 %>%
+  layer_lstm(units = 50, return_sequences = FALSE, name = "lstm_2") %>%
+  layer_dropout(rate = 0.2, name = "dropout_2")
+
+output_layer <- lstm_2 %>%
+  layer_dense(units = 1, name = "output_layer")
+
+# Combine the layers into a model
+model <- keras_model(inputs = input_layer, outputs = output_layer)
+
+```
+
+
+```{r}
+model %>% compile(
+  optimizer = "adam",
+  loss = "mse",
+  metrics = c("mae")
+)
+
+```
+
+
+```{r}
+# Train the model
+history <- model %>% fit(
+  train_X, train_y,
+  epochs = 20,
+  batch_size = 32,
+  validation_split = 0.2
+)
+
+# Evaluate the model
+model %>% evaluate(test_X, test_y)
+
+# Make predictions
+predictions <- model %>% predict(test_X)
+
+# Rescale predictions back to original scale
+rescaled_predictions <- predictions * attr(scaled_data, "scaled:scale")["Power_kw"] + 
+  attr(scaled_data, "scaled:center")["Power_kw"]
+
+# Save predictions
+rescaled_predictions
+```
+
+
+```{r}
+```

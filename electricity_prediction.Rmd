@@ -1,0 +1,445 @@
+---
+title: "Assignment"
+output:
+  pdf_document: default
+  html_document: default
+date: '2024-11-28'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r load_libraries, echo=FALSE}
+library(readxl)      # For reading Excel files
+library(forecast)
+library(ggplot2)
+library(keras)
+library(tensorflow)
+library(tseries)
+library(dplyr)
+
+```
+
+```{r load_data, echo=FALSE}
+elec_train <- read_excel('2023-11-Elec-train.xlsx') 
+colnames(elec_train) <- c("Date", "Power_kw", "Temp_c")
+
+elec_train$Date <- as.POSIXct(elec_train$Date, format="%m/%d/%Y %H:%M", tz="UTC")
+# Add time features
+elec_train$Hour <- as.numeric(format(elec_train$Date, "%H"))
+elec_train$Day <- as.numeric(format(elec_train$Date, "%u"))
+
+
+head(elec_train)
+
+
+```
+
+
+```{r check_missing_value, echo=FALSE}
+
+colSums(is.na(elec_train))
+```
+
+
+
+### Handle missing values 
+
+Plot Missing Data for power 
+```{r missing_data_power, echo= FALSE}
+
+library(imputeTS)
+
+ggplot_na_distribution(elec_train$Power_kw)
+
+
+elec_train$Power_kw = na_interpolation(elec_train$Power_kw)
+
+ggplot_na_distribution(elec_train$Power_kw)
+
+```
+```{r check_missing_value_2, echo=FALSE}
+
+colSums(is.na(elec_train))
+```
+
+
+```{r check_missing_value_3, echo=FALSE}
+
+colSums(is.na(elec_train))
+```
+```{r missing_value_after_dateformat, echo=FALSE}
+# Remove rows where Date is NA
+elec_train <- elec_train[!is.na(elec_train$Date), ]
+
+# Verify that no missing values remain in the Date column
+colSums(is.na(elec_train))
+```
+## Summmry 
+
+```{r summary, echo=FALSE}
+summary(elec_train)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r plot_data, echo=FALSE}
+plot(elec_train)
+```
+
+
+### ACF , PACF and ADF Test
+
+To check the Seasonality for Power- ACF AND PACF
+
+```{r check_seasonality_power}
+
+# Convert to time series
+power_ts <- ts(elec_train$Power_kw, frequency = 96)
+
+# ACF and PACF to check seasonality for power
+acf(power_ts, lag.max = 100)
+pacf(power_ts, lag.max = 100)
+
+```
+
+
+To check the Seasonality for Temperature - ACF AND PACF
+```{r seasonality_check_decompose, echo=FALSE}
+print(frequency(power_ts))
+
+decomposition <- decompose(power_ts, type = "additive")
+plot(decomposition)
+
+```
+We could see the stron seaonality in the data. 
+
+
+Test for Stationarity
+
+```{r test_stationrity_power, echo=FALSE}
+
+library(tseries)
+
+adf_test <- adf.test(elec_train$Temp_c, alternative = "stationary")
+print(adf_test)
+
+```
+
+Above concludes that we can make ARIMA test
+
+
+ACF: Significant autocorrelation at lag 1 and several subsequent lags, indicating potential for ARIMA models.
+PACF: A sharp drop after lag 1, which suggests an AR(1) process could be appropriate.
+
+
+### rTime Seies Plot
+
+```{r time series plotr, echo=FALSE}
+library(ggplot2)
+library(forecast)
+
+autoplot(power_ts) +
+  ggtitle("Electricity Consumption Time Series") +
+  xlab("Time") +
+  ylab("Power (kW)")
+
+```
+```{r }
+fit=tslm(power_ts~Temp_c+Hour+Day+trend+season,data=elec_train)
+summary(fit)
+```
+Here we could see that Temperature plays a significant role in the power consumption 
+
+
+```{r}
+CV(fit)
+```
+```{r}
+checkresiduals(fit, test=FALSE, plot=TRUE)
+```
+```{r}
+checkresiduals(fit, test='LB', plot=FALSE)
+```
+
+```{r}
+Box.test(residuals(fit), lag = 10, type = "Ljung-Box")
+
+acf(residuals(fit))
+```
+
+
+```{r}
+library(testcorr)
+
+cc.test(elec_train[,"Power_kw"],elec_train[,"Temp_c"],max.lag = 1, plot = FALSE)
+```
+#Split the dataset for traububg
+
+```{r split_train_test, echo=FALSE}
+set.seed(666) 
+train <- power_ts[1:(length(power_ts) - 96)]
+test <- power_ts[(length(power_ts) - 95):length(power_ts)]
+
+# Verify splits
+cat("Training set length:", length(train), "\n")
+cat("Testing set length:", length(test), "\n")
+
+
+if (length(train) < 192) {
+  stop("Training data must contain at least two seasonal cycles (192 observations for daily seasonality).")
+}
+
+```
+
+
+##  Forecasting Without Temperature
+
+
+### Holt-Winter Mode 
+
+```{r holt_winter_without_temp_test, echo=FALSE}
+
+# Ensure train is a ts object with correct frequency
+train <- ts(train, frequency = 96)
+
+# Check if training set has at least two full seasonal cycles
+if (length(train) >= 192) {
+  # Fit Holt-Winters with additive seasonality
+  hw_add <- HoltWinters(train, seasonal = "additive")
+  hw_add_forecast <- forecast(hw_add, h = length(test))
+  
+  # Calculate RMSE
+  rmse_hw_add <- sqrt(mean((test - hw_add_forecast$mean)^2))
+  cat("Holt-Winters Additive RMSE:", rmse_hw_add, "\n")
+} else {
+  stop("Training set must contain at least two full seasonal cycles (192 observations).")
+}
+
+
+
+
+```
+
+
+
+### SARIMA 
+
+``` {r SARIMA_without_temp_test, echo=FALSE}
+library(forecast)
+
+# Fit SARIMA
+sarima_model <- auto.arima(train, seasonal = TRUE)
+
+# Forecast for the test period
+sarima_forecast <- forecast(sarima_model, h = length(test))
+
+# Calculate RMSE
+rmse_sarima <- sqrt(mean((test - sarima_forecast$mean)^2))
+cat("SARIMA RMSE:", rmse_sarima, "\n")
+
+```
+
+
+
+## With Temperature
+
+
+### SARIMA with tempertaure
+``` {r Split_with_temperature, echo=FALSE}
+
+
+# Ensure temperature data is aligned with the time series
+train_with_temp <- elec_train[1:(nrow(elec_train) - 96), c("Power_kw", "Temp_c")]
+test_with_temp <- elec_train[(nrow(elec_train) - 95):nrow(elec_train), c("Power_kw", "Temp_c")]
+
+
+```
+
+``` {r SARIMA_with_temp_test, echo=FALSE}
+
+
+library(forecast)
+
+# Fit ARIMA with temperature as an exogenous variable
+sarima_with_temp <- auto.arima(train_with_temp$Power_kw, xreg = train_with_temp$Temp_c)
+
+# Forecast using temperature for the test period
+sarima_temp_forecast <- forecast(sarima_with_temp, xreg = test_with_temp$Temp_c, h = length(test_with_temp$Power_kw))
+
+# Calculate RMSE
+rmse_sarima_temp <- sqrt(mean((test_with_temp$Power_kw - sarima_temp_forecast$mean)^2))
+cat("SARIMA RMSE (with temperature):", rmse_sarima_temp, "\n")
+
+
+
+```
+
+### Random Forest with tempertaure
+``` {r randomforest_with_temp_test, echo=FALSE}
+
+library(randomForest)
+
+# Prepare lagged features and temperature for Random Forest
+train_rf <- data.frame(
+  Lag1 = lag(train_with_temp$Power_kw, 1),
+  Temp = train_with_temp$Temp_c,
+  Target = train_with_temp$Power_kw
+) %>% na.omit()  
+
+test_rf <- data.frame(
+  Lag1 = lag(test_with_temp$Power_kw, 1),
+  Temp = test_with_temp$Temp_c
+) %>% na.omit()
+
+# Train the Random Forest model
+rf_model <- randomForest(Target ~ Lag1 + Temp, data = train_rf, ntree = 100)
+
+# Forecast using Random Forest
+rf_forecast <- predict(rf_model, test_rf)
+
+# Calculate RMSE
+rmse_rf <- sqrt(mean((test_with_temp$Power_kw[2:length(test_with_temp$Power_kw)] - rf_forecast)^2))
+cat("Random Forest RMSE (with temperature):", rmse_rf, "\n")
+
+
+```
+
+
+## Result 
+
+
+```{r print_results}
+cat("Final Results:\n")
+cat("Holt-Winters RMSE (without temperature):", rmse_hw_add, "\n")
+cat("SARIMA RMSE (without temperature):", rmse_sarima, "\n")
+
+cat("SARIMA RMSE (with temperature):", rmse_sarima_temp, "\n")
+cat("Random Forest RMSE (with temperature):", rmse_rf, "\n")
+```
+### VAR 
+
+```{r}
+library(fpp2)
+```
+
+```{r}
+library(vars)
+set.seed(667)  # For 
+var_model <- VAR(train_with_temp, p=1, type = "const", season = 96)
+
+```
+
+```{r}
+summary(var_model)
+```
+
+```{r}
+# Forecast for the next 96 days (96 * 24 * 4 = 9216 intervals)
+forecast_results <- predict(var_model, n.ahead = 9216)
+```
+
+```{r}
+# Extract the forecasted Power values
+power_forecast <- forecast_results$fcst$Power_kw[, "fcst"]
+
+```
+
+```{r}
+# Calculate RMSE
+actual_power <- test_with_temp$Power_kw
+var_rmse <- sqrt(mean((actual_power - power_forecast)^2))
+
+# Calculate Mean of the Forecast
+forecast_mean <- mean(power_forecast)
+
+# Print RMSE and Mean
+cat(" VAR RMSE (With Temperature):", var_rmse, "\n")
+cat("Mean of the Forecasted Power:", forecast_mean, "\n")
+
+
+# Save the forecast results to a CSV
+write.csv(power_forecast, "VAR_power_forecast_96_days.csv", row.names = FALSE)
+
+# Plot the forecast
+plot.ts(power_forecast, main = "Forecasted Power for Next 96 Days (15-min intervals)", ylab = "Power (kW)", xlab = "Time")
+
+```
+### XG Boost
+
+
+```{r xgboost, echo=FALSE}
+# Install required packages
+library(xgboost)
+
+# Prepare data for XGBoost
+train_size <- floor(0.8 * nrow(elec_train))
+train_data <- elec_train[1:train_size, ]
+test_data <- elec_train[(train_size + 1):nrow(elec_train), ]
+
+# Prepare training and testing features (X) and target (y)
+train_x <- as.matrix(train_data[, c("Temp_c", "Hour", "Day")])  # Features
+train_y <- train_data$Power_kw  # Target variable
+
+test_x <- as.matrix(test_data[, c("Temp_c", "Hour", "Day")])  # Features
+test_y <- test_data$Power_kw  # Target variable
+
+# Convert to DMatrix format
+dtrain <- xgb.DMatrix(data = train_x, label = train_y)
+dtest <- xgb.DMatrix(data = test_x, label = test_y)
+
+# Train an XGBoost model
+xgb_model <- xgb.train(
+  data = dtrain, 
+  nrounds = 100, 
+  objective = "reg:squarederror"
+)
+
+# Predict using XGBoost
+xgb_predictions <- predict(xgb_model, newdata = dtest)
+
+# Evaluate XGBoost performance
+rmse_xgb <- sqrt(mean((test_y - xgb_predictions)^2))
+cat("XGBoost RMSE:", rmse_xgb, "\n")
+
+```
+
+
+```{r}
+# Compute RMSE for VAR and SARIMA
+rmse_var <- sqrt(mean((test_y - power_forecast)^2))
+
+
+cat("Final Results:\n")
+cat("Holt-Winters RMSE (without temperature):", rmse_hw_add, "\n")
+cat("SARIMA RMSE (without temperature):", rmse_sarima, "\n")
+
+cat("SARIMA RMSE (with temperature):", rmse_sarima_temp, "\n")
+cat("Random Forest RMSE (with temperature):", rmse_rf, "\n")
+cat("VAR RMSE (with temperature):", rmse_var, "\n")
+
+cat("XGBoost RMSE ( with temperature):", rmse_xgb, "\n")
+
+```
+
+
+```{r}
+library(openxlsx)
+aligned_sarima_forecast <- sarima_forecast$mean[2:length(sarima_forecast$mean)]
+
+predictions <- data.frame(
+  Without_Temperature = aligned_sarima_forecast,  # SARIMA predictions
+  With_Temperature = rf_forecast              # Random Forest predictions
+)
+
+# Export the predictions to an Excel file
+output_file <- "janani_sinniah_vellaswamy.xlsx"
+write.xlsx(predictions, output_file, row.names = FALSE)
+
+cat("Predictions exported to:", output_file, "\n")
+```
